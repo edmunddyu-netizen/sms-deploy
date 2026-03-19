@@ -1,8 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/bash
 set -e
 
-BASE_DIR="$HOME/sms_tool"
+BASE_DIR="/storage/emulated/0/sms_tool"
 BASE_URL="https://raw.githubusercontent.com/edmunddyu-netizen/sms-deploy/main"
+APP_DIR="$HOME/sms_tool"
+
+echo "第0步：请先确保你已经执行过 termux-setup-storage 并授予存储权限"
 
 echo "第1步：更新软件包列表"
 pkg update -y
@@ -11,33 +14,34 @@ echo "第2步：安装需要的工具"
 pkg install -y python termux-api curl nano
 
 echo "第3步：创建程序目录"
+mkdir -p "$APP_DIR"
 mkdir -p "$BASE_DIR"
 
 echo "第4步：下载主程序"
-curl -fsSL "$BASE_URL/sms_tool.py" -o "$BASE_DIR/sms_tool.py"
+curl -fsSL "$BASE_URL/sms_tool.py" -o "$APP_DIR/sms_tool.py"
 
 echo "第5步：创建启动脚本"
-cat > "$BASE_DIR/run.sh" <<'EOF'
+cat > "$APP_DIR/run.sh" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 cd "$HOME/sms_tool"
 python sms_tool.py
 EOF
 
-cat > "$BASE_DIR/123.sh" <<'EOF'
+cat > "$APP_DIR/123.sh" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 cd "$HOME/sms_tool"
 python sms_tool.py round1
 EOF
 
-cat > "$BASE_DIR/yzp.sh" <<'EOF'
+cat > "$APP_DIR/yzp.sh" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 cd "$HOME/sms_tool"
 python sms_tool.py round2
 EOF
 
-chmod +x "$BASE_DIR/run.sh"
-chmod +x "$BASE_DIR/123.sh"
-chmod +x "$BASE_DIR/yzp.sh"
+chmod +x "$APP_DIR/run.sh"
+chmod +x "$APP_DIR/123.sh"
+chmod +x "$APP_DIR/yzp.sh"
 
 echo "第6步：创建快捷命令"
 cat > "$PREFIX/bin/sms-tool" <<'EOF'
@@ -65,10 +69,12 @@ echo "菜单模式：sms-tool"
 echo "第一轮快捷发送：123.sh"
 echo "第二轮快捷发送：yzp.sh"
 echo ""
-echo "本地文件目录：$BASE_DIR"
-echo "请手动准备这些文件："
+echo "共享文件目录：$BASE_DIR"
+echo "这些文件会自动创建到共享目录里："
 echo "1. number.txt"
 echo "2. guanggao.txt"
 echo "3. yzp huashu.txt"
-echo "4. sent number.txt（程序会自动维护）"
-echo "5. yzp info.txt（程序会自动生成）"
+echo "4. sent number.txt"
+echo "5. yzp info.txt"
+echo "6. config.json"
+echo "7. logs.json"
