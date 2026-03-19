@@ -1,2 +1,995 @@
-print("一键安装测试成功")
-input("按回车退出")
+import os
+import json
+import time
+import random
+import subprocess
+import sys
+from datetime import datetime
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+NUMBER_FILE = os.path.join(BASE_DIR, "number.txt")
+CONTENT1_FILE = os.path.join(BASE_DIR, "guanggao.txt")
+SENT_NUMBER_FILE = os.path.join(BASE_DIR, "sent number.txt")
+CONTENT2_FILE = os.path.join(BASE_DIR, "yzp huashu.txt")
+YZP_INFO_FILE = os.path.join(BASE_DIR, "yzp info.txt")
+
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+LOG_FILE = os.path.join(BASE_DIR, "logs.json")
+
+DEFAULT_CONFIG = {
+    "send_mode_round1": "rotate",         # sim1 / sim2 / rotate
+    "send_mode_round2": "inherit",        # sim1 / sim2 / inherit
+    "sim1_slot": 0,
+    "sim2_slot": 1,
+    "sim1_min_interval": 1200,
+    "sim1_max_interval": 1500,
+    "sim2_min_interval": 1200,
+    "sim2_max_interval": 1500,
+    "scan_inbox_limit": 500,
+    "contact_prefix": "YZP_"
+}
+
+
+def now_str():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def short_time_str():
+    return datetime.now().strftime("%d %H:%M:%S")
+
+
+def pause():
+    input("\n按回车继续...")
+
+
+def ensure_files():
+    os.makedirs(BASE_DIR, exist_ok=True)
+
+    files_to_init = [
+        NUMBER_FILE,
+        CONTENT1_FILE,
+        SENT_NUMBER_FILE,
+        CONTENT2_FILE,
+        YZP_INFO_FILE,
+    ]
+    for path in files_to_init:
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("")
+
+    if not os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+
+    if not os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+
+
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_config():
+    cfg = load_json(CONFIG_FILE, DEFAULT_CONFIG.copy())
+    for k, v in DEFAULT_CONFIG.items():
+        if k not in cfg:
+            cfg[k] = v
+    return cfg
+
+
+def save_config(cfg):
+    save_json(CONFIG_FILE, cfg)
+
+
+def load_logs():
+    return load_json(LOG_FILE, [])
+
+
+def append_log(item):
+    logs = load_logs()
+    logs.append(item)
+    save_json(LOG_FILE, logs)
+
+
+def normalize_phone(phone):
+    if phone is None:
+        return ""
+    s = str(phone).strip()
+    for ch in [" ", "-", "(", ")", "\t", "\n", "\r"]:
+        s = s.replace(ch, "")
+    if s.startswith("+86"):
+        s = s[3:]
+    elif s.startswith("86") and len(s) > 11:
+        s = s[2:]
+    return s
+
+
+def load_numbers_txt(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        raw = [x.strip() for x in f.readlines() if x.strip()]
+    result = []
+    seen = set()
+    for x in raw:
+        n = normalize_phone(x)
+        if n and n not in seen:
+            seen.add(n)
+            result.append(n)
+    return result
+
+
+def save_numbers_txt(path, numbers):
+    seen = set()
+    clean = []
+    for n in numbers:
+        n = normalize_phone(n)
+        if n and n not in seen:
+            seen.add(n)
+            clean.append(n)
+    with open(path, "w", encoding="utf-8") as f:
+        for n in clean:
+            f.write(n + "\n")
+
+
+def append_number_if_missing(path, phone):
+    numbers = load_numbers_txt(path)
+    phone = normalize_phone(phone)
+    if phone and phone not in numbers:
+        numbers.append(phone)
+        save_numbers_txt(path, numbers)
+
+
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def write_text(path, text):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def format_sms_time(value):
+    if value is None or value == "":
+        return "未知"
+    try:
+        s = str(value).strip()
+        if s.isdigit():
+            num = int(s)
+            if num > 10**12:
+                dt = datetime.fromtimestamp(num / 1000)
+            elif num > 10**9:
+                dt = datetime.fromtimestamp(num)
+            else:
+                return s
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        return s
+    except Exception:
+        return str(value)
+
+
+def termux_send_sms(phone, text, slot):
+    cmd = ["termux-sms-send", "-n", phone, "-s", str(slot), text]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    ok = result.returncode == 0
+    return ok, result.stdout.strip(), result.stderr.strip()
+
+
+def get_slot_label(slot, cfg):
+    if slot == cfg["sim1_slot"]:
+        return "SIM1"
+    if slot == cfg["sim2_slot"]:
+        return "SIM2"
+    return f"SLOT{slot}"
+
+
+def get_interval_range_for_slot(slot, cfg):
+    if slot == cfg["sim1_slot"]:
+        return cfg["sim1_min_interval"], cfg["sim1_max_interval"]
+    if slot == cfg["sim2_slot"]:
+        return cfg["sim2_min_interval"], cfg["sim2_max_interval"]
+    return cfg["sim1_min_interval"], cfg["sim1_max_interval"]
+
+
+def get_other_range_for_slot(slot, cfg):
+    if slot == cfg["sim1_slot"]:
+        return cfg["sim2_min_interval"], cfg["sim2_max_interval"]
+    if slot == cfg["sim2_slot"]:
+        return cfg["sim1_min_interval"], cfg["sim1_max_interval"]
+    return cfg["sim1_min_interval"], cfg["sim1_max_interval"]
+
+
+def random_interval_for_slot(slot, cfg):
+    min_sec, max_sec = get_interval_range_for_slot(slot, cfg)
+    return random.randint(min_sec, max_sec)
+
+
+def print_send_success(slot, phone, cfg, contact_name=""):
+    sim_label = get_slot_label(slot, cfg)
+    if contact_name:
+        print(f"({sim_label})-{short_time_str()}  已发送: {contact_name} / {phone}")
+    else:
+        print(f"({sim_label})-{short_time_str()}  已发送: {phone}")
+
+
+def print_send_skip(slot, phone, cfg, reason):
+    sim_label = get_slot_label(slot, cfg)
+    print(f"({sim_label})-{short_time_str()}  已跳过: {phone}  原因: {reason}")
+
+
+def print_send_fail(slot, phone, cfg, reason="", contact_name=""):
+    sim_label = get_slot_label(slot, cfg)
+    if contact_name:
+        print(f"({sim_label})-{short_time_str()}  发送失败: {contact_name} / {phone}")
+    else:
+        print(f"({sim_label})-{short_time_str()}  发送失败: {phone}")
+    if reason:
+        print(f"原因: {reason}")
+
+
+def print_wait_status(current_slot, current_wait, cfg):
+    other_min, other_max = get_other_range_for_slot(current_slot, cfg)
+    print(
+        f"{now_str()}  操作完成，当前卡等待 {current_wait} 秒，"
+        f"另一张卡区间 {other_min}-{other_max} 秒..."
+    )
+
+
+def validate_runtime_config(cfg):
+    errors = []
+
+    if cfg["sim1_slot"] == cfg["sim2_slot"]:
+        errors.append("SIM1 和 SIM2 的 slot 不能相同")
+
+    if cfg["sim1_min_interval"] <= 0 or cfg["sim1_max_interval"] <= 0:
+        errors.append("SIM1 间隔必须大于 0")
+    if cfg["sim2_min_interval"] <= 0 or cfg["sim2_max_interval"] <= 0:
+        errors.append("SIM2 间隔必须大于 0")
+
+    if cfg["sim1_min_interval"] > cfg["sim1_max_interval"]:
+        errors.append("SIM1 最小间隔不能大于最大间隔")
+    if cfg["sim2_min_interval"] > cfg["sim2_max_interval"]:
+        errors.append("SIM2 最小间隔不能大于最大间隔")
+
+    return errors
+
+
+def confirm_before_round(title, content_file, content_text, extra_lines):
+    print(f"\n===== {title} =====")
+    print(f"当前发送文件: {content_file}")
+    print("当前发送内容:\n")
+    print(content_text if content_text else "(空内容)")
+    print("")
+    for line in extra_lines:
+        print(line)
+    print("")
+    answer = input("确认开始发送吗？输入 yes 开始，其它任意内容取消: ").strip().lower()
+    return answer == "yes"
+
+
+def get_slot_for_round1(index, cfg):
+    mode = cfg["send_mode_round1"]
+    if mode == "sim1":
+        return cfg["sim1_slot"]
+    if mode == "sim2":
+        return cfg["sim2_slot"]
+    if index % 2 == 0:
+        return cfg["sim1_slot"]
+    return cfg["sim2_slot"]
+
+
+def get_sent_slot_map():
+    logs = load_logs()
+    result = {}
+    for item in logs:
+        if item.get("round") == 1 and item.get("ok") is True:
+            phone = normalize_phone(item.get("phone", ""))
+            if phone:
+                result[phone] = item.get("slot")
+    return result
+
+
+def get_slot_for_round2(phone, cfg):
+    mode = cfg["send_mode_round2"]
+    sent_slot_map = get_sent_slot_map()
+    phone = normalize_phone(phone)
+
+    if mode == "sim1":
+        return cfg["sim1_slot"]
+    if mode == "sim2":
+        return cfg["sim2_slot"]
+
+    return sent_slot_map.get(phone, cfg["sim1_slot"])
+
+
+def extract_contact_name(contact):
+    for key in ["name", "display_name", "nickname"]:
+        val = contact.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+def extract_contact_numbers(contact):
+    result = []
+
+    numbers = contact.get("numbers")
+    if isinstance(numbers, list):
+        for item in numbers:
+            if isinstance(item, str):
+                p = normalize_phone(item)
+                if p:
+                    result.append(p)
+            elif isinstance(item, dict):
+                for k in ["number", "phone", "value"]:
+                    if k in item:
+                        p = normalize_phone(item.get(k))
+                        if p:
+                            result.append(p)
+
+    phone_numbers = contact.get("phoneNumbers")
+    if isinstance(phone_numbers, list):
+        for item in phone_numbers:
+            if isinstance(item, str):
+                p = normalize_phone(item)
+                if p:
+                    result.append(p)
+            elif isinstance(item, dict):
+                for k in ["number", "phone", "value"]:
+                    if k in item:
+                        p = normalize_phone(item.get(k))
+                        if p:
+                            result.append(p)
+
+    for k, v in contact.items():
+        if k.lower() in ["number", "phone", "mobile"]:
+            p = normalize_phone(v)
+            if p:
+                result.append(p)
+
+    clean = []
+    seen = set()
+    for x in result:
+        if x and x not in seen:
+            seen.add(x)
+            clean.append(x)
+    return clean
+
+
+def load_contacts_raw():
+    cmd = ["termux-contact-list"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None, result.stderr.strip() or result.stdout.strip()
+
+    try:
+        data = json.loads(result.stdout)
+    except Exception as e:
+        return None, f"联系人JSON解析失败: {e}"
+
+    if not isinstance(data, list):
+        return [], ""
+    return data, ""
+
+
+def build_contact_name_map():
+    raw_contacts, err = load_contacts_raw()
+    if raw_contacts is None:
+        return {}, err
+
+    contact_name_map = {}
+    for item in raw_contacts:
+        if not isinstance(item, dict):
+            continue
+        name = extract_contact_name(item)
+        if not name:
+            continue
+        for phone in extract_contact_numbers(item):
+            if phone and phone not in contact_name_map:
+                contact_name_map[phone] = name
+    return contact_name_map, ""
+
+
+def load_prefixed_contacts(prefix):
+    raw_contacts, err = load_contacts_raw()
+    if raw_contacts is None:
+        return None, err
+
+    selected = []
+    for item in raw_contacts:
+        if not isinstance(item, dict):
+            continue
+        name = extract_contact_name(item)
+        if prefix in name:
+            numbers = extract_contact_numbers(item)
+            for phone in numbers:
+                selected.append({
+                    "name": name,
+                    "phone": phone
+                })
+
+    clean = []
+    seen = set()
+    for item in selected:
+        key = (item["name"], item["phone"])
+        if key not in seen:
+            seen.add(key)
+            clean.append(item)
+    return clean, ""
+
+
+def show_status():
+    cfg = load_config()
+    n1 = load_numbers_txt(NUMBER_FILE)
+    sent = load_numbers_txt(SENT_NUMBER_FILE)
+    content1 = read_text(CONTENT1_FILE)
+    content2 = read_text(CONTENT2_FILE)
+    logs = load_logs()
+
+    print("\n===== 当前状态 =====")
+    print("号码合集1剩余数量：", len(n1))
+    print("已发送成功数量：", len(sent))
+    print("内容1长度：", len(content1))
+    print("内容2长度：", len(content2))
+    print("第一轮模式：", cfg.get("send_mode_round1"))
+    print("第二轮模式：", cfg.get("send_mode_round2"))
+    print("联系人前缀：", cfg.get("contact_prefix"))
+    print(
+        "SIM1 slot：", cfg.get("sim1_slot"),
+        "区间：", f"{cfg.get('sim1_min_interval')}-{cfg.get('sim1_max_interval')} 秒"
+    )
+    print(
+        "SIM2 slot：", cfg.get("sim2_slot"),
+        "区间：", f"{cfg.get('sim2_min_interval')}-{cfg.get('sim2_max_interval')} 秒"
+    )
+    print("扫描收件箱条数：", cfg.get("scan_inbox_limit"))
+    print("日志总条数：", len(logs))
+    print("====================")
+
+
+def config_menu():
+    while True:
+        cfg = load_config()
+        print("\n===== 配置菜单 =====")
+        print("1. 设置第一轮模式（sim1 / sim2 / rotate）")
+        print("2. 设置第二轮模式（sim1 / sim2 / inherit）")
+        print("3. 设置SIM1对应slot")
+        print("4. 设置SIM2对应slot")
+        print("5. 设置SIM1最小发送间隔秒数")
+        print("6. 设置SIM1最大发送间隔秒数")
+        print("7. 设置SIM2最小发送间隔秒数")
+        print("8. 设置SIM2最大发送间隔秒数")
+        print("9. 设置扫描收件箱条数")
+        print("10. 设置联系人前缀")
+        print("11. 返回")
+
+        choice = input("请选择：").strip()
+
+        if choice == "1":
+            val = input("请输入 sim1 / sim2 / rotate：").strip().lower()
+            if val in ["sim1", "sim2", "rotate"]:
+                cfg["send_mode_round1"] = val
+                save_config(cfg)
+                print("已保存")
+            else:
+                print("输入无效")
+        elif choice == "2":
+            val = input("请输入 sim1 / sim2 / inherit：").strip().lower()
+            if val in ["sim1", "sim2", "inherit"]:
+                cfg["send_mode_round2"] = val
+                save_config(cfg)
+                print("已保存")
+            else:
+                print("输入无效")
+        elif choice == "3":
+            try:
+                cfg["sim1_slot"] = int(input("请输入SIM1对应slot（一般0或1）：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "4":
+            try:
+                cfg["sim2_slot"] = int(input("请输入SIM2对应slot（一般0或1）：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "5":
+            try:
+                cfg["sim1_min_interval"] = int(input("请输入SIM1最小发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "6":
+            try:
+                cfg["sim1_max_interval"] = int(input("请输入SIM1最大发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "7":
+            try:
+                cfg["sim2_min_interval"] = int(input("请输入SIM2最小发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "8":
+            try:
+                cfg["sim2_max_interval"] = int(input("请输入SIM2最大发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "9":
+            try:
+                cfg["scan_inbox_limit"] = int(input("请输入扫描收件箱条数（如500）：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+        elif choice == "10":
+            val = input("请输入联系人前缀（如 YZP_）：").strip()
+            if val:
+                cfg["contact_prefix"] = val
+                save_config(cfg)
+                print("已保存")
+            else:
+                print("前缀不能为空")
+        elif choice == "11":
+            break
+        else:
+            print("无效选择")
+
+
+def send_batch_round1():
+    cfg = load_config()
+    errors = validate_runtime_config(cfg)
+    if errors:
+        print("\n运行前检查未通过：")
+        for e in errors:
+            print("-", e)
+        return
+
+    text = read_text(CONTENT1_FILE)
+    remaining_numbers = load_numbers_txt(NUMBER_FILE)
+    sent_set = set(load_numbers_txt(SENT_NUMBER_FILE))
+
+    confirmed = confirm_before_round(
+        "第一轮发送确认",
+        "guanggao.txt",
+        text,
+        [
+            f"号码剩余数量: {len(remaining_numbers)}",
+            f"已发送成功数量: {len(sent_set)}",
+            f"发送模式: {cfg['send_mode_round1']}",
+            f"SIM1区间: {cfg['sim1_min_interval']}-{cfg['sim1_max_interval']} 秒",
+            f"SIM2区间: {cfg['sim2_min_interval']}-{cfg['sim2_max_interval']} 秒",
+            "如内容不对，请先退出并修改 guanggao.txt"
+        ]
+    )
+    if not confirmed:
+        print("已取消发送")
+        return
+
+    total_at_start = len(remaining_numbers)
+    success = 0
+    fail = 0
+    skipped = 0
+    index = 0
+
+    print(f"\n开始第一轮发送，共 {total_at_start} 个号码")
+    print("规则：发送成功一条，就从 number.txt 删除，并写入 sent number.txt")
+    print("规则：如果号码已存在于 sent number.txt，会直接跳过不再发送")
+    print("按 Ctrl + C 可手动停止，未成功发送的号码会保留。")
+
+    try:
+        while True:
+            current_numbers = load_numbers_txt(NUMBER_FILE)
+            if not current_numbers:
+                break
+
+            phone = current_numbers[0]
+            slot = get_slot_for_round1(index, cfg)
+
+            if phone in sent_set:
+                skipped += 1
+                print_send_skip(slot, phone, cfg, "已存在于 sent number.txt")
+                current_numbers.pop(0)
+                save_numbers_txt(NUMBER_FILE, current_numbers)
+                print(f"剩余号码: {len(current_numbers)}")
+                index += 1
+                continue
+
+            ok, out, err = termux_send_sms(phone, text, slot)
+
+            append_log({
+                "time": now_str(),
+                "round": 1,
+                "phone": phone,
+                "slot": slot,
+                "text": text,
+                "ok": ok,
+                "stdout": out,
+                "stderr": err
+            })
+
+            if ok:
+                success += 1
+                print_send_success(slot, phone, cfg)
+
+                current_numbers = load_numbers_txt(NUMBER_FILE)
+                if current_numbers and current_numbers[0] == phone:
+                    current_numbers.pop(0)
+                else:
+                    current_numbers = [x for x in current_numbers if x != phone]
+                save_numbers_txt(NUMBER_FILE, current_numbers)
+
+                append_number_if_missing(SENT_NUMBER_FILE, phone)
+                sent_set.add(phone)
+
+                remaining = len(current_numbers)
+                print(f"剩余号码: {remaining}")
+
+                if remaining > 0:
+                    wait_sec = random_interval_for_slot(slot, cfg)
+                    print_wait_status(slot, wait_sec, cfg)
+                    time.sleep(wait_sec)
+            else:
+                fail += 1
+                print_send_fail(slot, phone, cfg, err or out)
+                print(f"剩余号码: {len(load_numbers_txt(NUMBER_FILE))}")
+
+            index += 1
+
+    except KeyboardInterrupt:
+        print("\n已手动停止第一轮发送")
+        print(
+            f"当前结果 -> 成功: {success} 失败: {fail} 跳过: {skipped} "
+            f"剩余: {len(load_numbers_txt(NUMBER_FILE))} 已发送库: {len(load_numbers_txt(SENT_NUMBER_FILE))}"
+        )
+        return
+
+    print(f"{now_str()}  本轮全部完成")
+    print(
+        f"总数: {total_at_start}  成功: {success} 失败: {fail} 跳过: {skipped} "
+        f"剩余: {len(load_numbers_txt(NUMBER_FILE))}"
+    )
+
+
+def scan_replies_to_info():
+    cfg = load_config()
+    sent_numbers = set(load_numbers_txt(SENT_NUMBER_FILE))
+
+    print(f"\n开始扫描收件箱，最多读取最近 {cfg['scan_inbox_limit']} 条短信...")
+
+    sms_result = subprocess.run(
+        ["termux-sms-list", "-t", "inbox", "-l", str(cfg["scan_inbox_limit"])],
+        capture_output=True,
+        text=True
+    )
+    if sms_result.returncode != 0:
+        print("读取收件箱失败")
+        if sms_result.stderr.strip():
+            print("错误：", sms_result.stderr.strip())
+        elif sms_result.stdout.strip():
+            print("输出：", sms_result.stdout.strip())
+        return
+
+    try:
+        sms_data = json.loads(sms_result.stdout)
+    except Exception as e:
+        print("短信JSON解析失败：", e)
+        return
+
+    contact_name_map, contact_err = build_contact_name_map()
+
+    first_reply_map = {}
+    for msg in sms_data:
+        if not isinstance(msg, dict):
+            continue
+
+        phone = normalize_phone(msg.get("address", ""))
+        if not phone or phone not in sent_numbers:
+            continue
+
+        if phone in first_reply_map:
+            continue
+
+        body = str(msg.get("body", "")).strip()
+        raw_time = msg.get("received", msg.get("date", msg.get("timestamp", "")))
+        reply_time = format_sms_time(raw_time)
+
+        first_reply_map[phone] = {
+            "reply_time": reply_time,
+            "reply_text": body,
+            "raw_time": raw_time
+        }
+
+    sent_slot_map = get_sent_slot_map()
+
+    lines = []
+    lines.append("===== yzp info =====")
+    lines.append(f"生成时间: {now_str()}")
+    lines.append("说明: 第二轮发送不读取这个文件，只给你查看。")
+    lines.append("你看完后，去手机联系人里把想发第二轮的人名改成带前缀，例如 YZP_张三。")
+    lines.append("")
+
+    count = 0
+    sorted_items = sorted(
+        first_reply_map.items(),
+        key=lambda x: str(x[1].get("raw_time", "")),
+        reverse=True
+    )
+
+    for phone, info in sorted_items:
+        count += 1
+        slot = sent_slot_map.get(phone, "未知")
+        contact_name = contact_name_map.get(phone, "未命名联系人")
+        lines.append("========================================")
+        lines.append(f"号码: {phone}")
+        lines.append(f"联系人名称: {contact_name}")
+        lines.append(f"回复时间: {info.get('reply_time', '未知')}")
+        lines.append(f"第一条回复内容: {info.get('reply_text', '')}")
+        lines.append(f"继承卡槽: {slot}")
+        lines.append("========================================")
+        lines.append("")
+
+    if count == 0:
+        lines.append("未发现来自 sent number.txt 的回复号码。")
+        lines.append("")
+
+    write_text(YZP_INFO_FILE, "\n".join(lines))
+
+    print("扫描完成，已更新 yzp info.txt")
+    print("识别到回复号码数量：", count)
+    if contact_err:
+        print("联系人名称读取未完全成功：", contact_err)
+
+
+def send_batch_round2():
+    cfg = load_config()
+    errors = validate_runtime_config(cfg)
+    if errors:
+        print("\n运行前检查未通过：")
+        for e in errors:
+            print("-", e)
+        return
+
+    text = read_text(CONTENT2_FILE)
+    prefix = cfg.get("contact_prefix", "YZP_")
+
+    contacts, err = load_prefixed_contacts(prefix)
+    if contacts is None:
+        print("读取联系人失败：", err)
+        return
+
+    confirmed = confirm_before_round(
+        "第二轮发送确认",
+        "yzp huashu.txt",
+        text,
+        [
+            f"联系人前缀: {prefix}",
+            f"当前匹配联系人数量: {len(contacts)}",
+            f"发送模式: {cfg['send_mode_round2']}",
+            f"SIM1区间: {cfg['sim1_min_interval']}-{cfg['sim1_max_interval']} 秒",
+            f"SIM2区间: {cfg['sim2_min_interval']}-{cfg['sim2_max_interval']} 秒",
+            "如内容不对，请先退出并修改 yzp huashu.txt"
+        ]
+    )
+    if not confirmed:
+        print("已取消发送")
+        return
+
+    if not contacts:
+        print(f"未找到名称包含前缀 {prefix} 的联系人")
+        print("请先去手机联系人里，把想发第二轮的人名改成类似：")
+        print(f"{prefix}张三")
+        return
+
+    total = len(contacts)
+    success = 0
+    fail = 0
+
+    print(f"\n开始第二轮发送，共 {total} 个联系人号码")
+    print(f"筛选规则：联系人名称包含前缀 {prefix}")
+    print("按 Ctrl + C 可手动停止。")
+
+    try:
+        for i, item in enumerate(contacts):
+            name = item["name"]
+            phone = item["phone"]
+            slot = get_slot_for_round2(phone, cfg)
+
+            ok, out, err_text = termux_send_sms(phone, text, slot)
+
+            append_log({
+                "time": now_str(),
+                "round": 2,
+                "phone": phone,
+                "contact_name": name,
+                "slot": slot,
+                "text": text,
+                "ok": ok,
+                "stdout": out,
+                "stderr": err_text
+            })
+
+            if ok:
+                success += 1
+                print_send_success(slot, phone, cfg, name)
+            else:
+                fail += 1
+                print_send_fail(slot, phone, cfg, err_text or out, name)
+
+            remaining_contacts = total - (i + 1)
+            print(f"剩余联系人: {remaining_contacts}")
+
+            if i < total - 1:
+                wait_sec = random_interval_for_slot(slot, cfg)
+                print_wait_status(slot, wait_sec, cfg)
+                time.sleep(wait_sec)
+
+    except KeyboardInterrupt:
+        remaining_contacts = total - (success + fail)
+        print("\n已手动停止第二轮发送")
+        print(
+            f"当前结果 -> 成功: {success} 失败: {fail} "
+            f"剩余联系人: {remaining_contacts}"
+        )
+        return
+
+    print(f"{now_str()}  本轮全部完成")
+    print(f"总数: {total}  成功: {success} 失败: {fail} 剩余联系人: 0")
+
+
+def show_recent_logs():
+    logs = load_logs()
+    if not logs:
+        print("暂无日志")
+        return
+
+    print("\n===== 最近30条日志 =====")
+    for item in logs[-30:]:
+        status = "成功" if item.get("ok") else "失败"
+        round_no = item.get("round")
+        phone = item.get("phone", "")
+        slot = item.get("slot", "")
+        name = item.get("contact_name", "")
+        if name:
+            print(f"{item.get('time')} | R{round_no} | {name} | {phone} | slot={slot} | {status}")
+        else:
+            print(f"{item.get('time')} | R{round_no} | {phone} | slot={slot} | {status}")
+    print("=======================")
+
+
+def show_file_locations():
+    print("\n===== 文件位置 =====")
+    print("号码合集1：", NUMBER_FILE)
+    print("内容1：", CONTENT1_FILE)
+    print("已发送：", SENT_NUMBER_FILE)
+    print("内容2：", CONTENT2_FILE)
+    print("回复详情：", YZP_INFO_FILE)
+    print("配置文件：", CONFIG_FILE)
+    print("发送日志：", LOG_FILE)
+    print("====================")
+
+
+def show_help():
+    print("\n===== 菜单使用说明 =====")
+    print("一、第一轮发送前")
+    print("1. 手动编辑 number.txt，放入号码，一行一个")
+    print("2. 手动编辑 guanggao.txt，写入第一轮内容")
+    print("3. 如需修改模式、卡槽、随机区间、联系人前缀，进入配置菜单设置")
+    print("4. 回主菜单执行“第一轮发送”")
+    print("")
+    print("二、第一轮发送规则")
+    print("1. 发送成功一条，就会从 number.txt 删除一条")
+    print("2. 同时会写入 sent number.txt")
+    print("3. 如果发送失败，该号码会保留在 number.txt")
+    print("4. 如果号码已存在于 sent number.txt，会被直接跳过，不再发送内容1")
+    print("")
+    print("三、扫描回复")
+    print("1. 第一轮完成后，执行“扫描回复”")
+    print("2. 程序会生成 yzp info.txt")
+    print("3. 里面会有号码、联系人名称、回复时间、第一条回复内容、继承卡槽")
+    print("")
+    print("四、第二轮发送前")
+    print("1. 手动编辑 yzp huashu.txt，写入第二轮内容")
+    print("2. 去手机联系人里，把想发第二轮的人名改成带前缀")
+    print("   例如：YZP_张三")
+    print("3. 回主菜单执行“第二轮发送”")
+    print("")
+    print("五、快捷命令")
+    print("sms-tool = 打开菜单")
+    print("123.sh   = 直接执行第一轮")
+    print("yzp.sh   = 直接执行第二轮")
+    print("========================")
+
+
+def main_menu():
+    ensure_files()
+
+    while True:
+        print("\n========== 短信工具 ==========")
+        print("1. 查看当前状态")
+        print("2. 执行第一轮发送")
+        print("3. 扫描回复 -> 生成 yzp info.txt")
+        print("4. 执行第二轮发送（按联系人前缀）")
+        print("5. 配置模式 / 卡槽 / 随机区间 / 前缀")
+        print("6. 查看最近日志")
+        print("7. 查看文件位置")
+        print("8. 菜单使用说明")
+        print("9. 退出")
+        print("================================")
+
+        choice = input("请选择：").strip()
+
+        if choice == "1":
+            show_status()
+            pause()
+        elif choice == "2":
+            send_batch_round1()
+            pause()
+        elif choice == "3":
+            scan_replies_to_info()
+            pause()
+        elif choice == "4":
+            send_batch_round2()
+            pause()
+        elif choice == "5":
+            config_menu()
+        elif choice == "6":
+            show_recent_logs()
+            pause()
+        elif choice == "7":
+            show_file_locations()
+            pause()
+        elif choice == "8":
+            show_help()
+            pause()
+        elif choice == "9":
+            print("已退出")
+            break
+        else:
+            print("无效选择")
+
+
+def run_mode_round1():
+    ensure_files()
+    send_batch_round1()
+
+
+def run_mode_round2():
+    ensure_files()
+    send_batch_round2()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        arg = sys.argv[1].strip().lower()
+        if arg == "round1":
+            run_mode_round1()
+        elif arg == "round2":
+            run_mode_round2()
+        else:
+            main_menu()
+    else:
+        main_menu()
