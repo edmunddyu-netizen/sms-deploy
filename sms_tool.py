@@ -215,35 +215,37 @@ def format_next_time(ts):
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
 
 
-def print_send_success(slot, phone, cfg, contact_name=""):
+def print_send_success(slot, phone, cfg, remaining_count, contact_name=""):
     sim_label = get_slot_label(slot, cfg)
     if contact_name:
-        print(f"({sim_label})-{short_time_str()}  已发送: {contact_name} / {phone}")
+        print(f"({sim_label})-{short_time_str()}  已发送: {contact_name} / {phone}  剩余: {remaining_count}")
     else:
-        print(f"({sim_label})-{short_time_str()}  已发送: {phone}")
+        print(f"({sim_label})-{short_time_str()}  已发送: {phone}  剩余: {remaining_count}")
 
 
-def print_send_skip(slot, phone, cfg, reason):
+def print_send_skip(slot, phone, cfg, reason, remaining_count):
     sim_label = get_slot_label(slot, cfg)
-    print(f"({sim_label})-{short_time_str()}  已跳过: {phone}  原因: {reason}")
+    print(f"({sim_label})-{short_time_str()}  已跳过: {phone}  原因: {reason}  剩余: {remaining_count}")
 
 
-def print_send_fail(slot, phone, cfg, reason="", contact_name=""):
+def print_send_fail(slot, phone, cfg, reason, remaining_count, contact_name=""):
     sim_label = get_slot_label(slot, cfg)
     if contact_name:
-        print(f"({sim_label})-{short_time_str()}  发送失败: {contact_name} / {phone}")
+        print(f"({sim_label})-{short_time_str()}  发送失败: {contact_name} / {phone}  剩余: {remaining_count}")
     else:
-        print(f"({sim_label})-{short_time_str()}  发送失败: {phone}")
+        print(f"({sim_label})-{short_time_str()}  发送失败: {phone}  剩余: {remaining_count}")
     if reason:
         print(f"原因: {reason}")
 
 
-def print_dual_status(next_ready, cfg, remaining_label, remaining_count):
-    sim1_next = format_next_time(next_ready[cfg["sim1_slot"]])
-    sim2_next = format_next_time(next_ready[cfg["sim2_slot"]])
-    print(f"SIM1 下次发送时间: {sim1_next}")
-    print(f"SIM2 下次发送时间: {sim2_next}")
-    print(f"{remaining_label}: {remaining_count}")
+def print_compact_next_times(next_ready, cfg, active_slots):
+    parts = []
+    if cfg["sim1_slot"] in active_slots:
+        parts.append(f"SIM1: {format_next_time(next_ready[cfg['sim1_slot']])}")
+    if cfg["sim2_slot"] in active_slots:
+        parts.append(f"SIM2: {format_next_time(next_ready[cfg['sim2_slot']])}")
+    if parts:
+        print("下次时间 -> " + " | ".join(parts))
 
 
 def validate_runtime_config(cfg):
@@ -585,8 +587,6 @@ def send_batch_round1():
     fail = 0
     skipped = 0
 
-    # 仅激活需要使用的卡
-    active_slots = []
     if cfg["send_mode_round1"] == "sim1":
         active_slots = [cfg["sim1_slot"]]
     elif cfg["send_mode_round1"] == "sim2":
@@ -595,7 +595,19 @@ def send_batch_round1():
         active_slots = [cfg["sim1_slot"], cfg["sim2_slot"]]
 
     now_ts = time.time()
-    next_ready = {slot: now_ts for slot in active_slots}
+    next_ready = {}
+
+    if len(active_slots) == 1:
+        next_ready[active_slots[0]] = now_ts
+    else:
+        sim1 = cfg["sim1_slot"]
+        sim2 = cfg["sim2_slot"]
+        if sim1 in active_slots:
+            next_ready[sim1] = now_ts
+        if sim2 in active_slots:
+            next_ready[sim2] = now_ts + 5
+
+    status_dirty_slots = set(active_slots)
 
     print(f"\n开始第一轮发送，共 {total_at_start} 个号码")
     print("规则：发送成功一条，就从 number.txt 删除，并写入 sent number.txt")
@@ -613,13 +625,11 @@ def send_batch_round1():
             ready_slots = [slot for slot in active_slots if now_ts >= next_ready[slot]]
 
             if not ready_slots:
-                # 睡到最近一次 ready，最多睡 0.5 秒，便于响应 Ctrl+C
                 nearest = min(next_ready.values())
                 sleep_for = max(0.0, nearest - now_ts)
                 time.sleep(min(sleep_for, 0.5))
                 continue
 
-            # 同一时刻两张卡都 ready，则按 next_ready 早的先处理；相同时按 slot 顺序
             ready_slots.sort(key=lambda s: (next_ready[s], s))
 
             for slot in ready_slots:
@@ -631,14 +641,14 @@ def send_batch_round1():
 
                 if phone in sent_set:
                     skipped += 1
-                    print_send_skip(slot, phone, cfg, "已存在于 sent number.txt")
                     current_numbers.pop(0)
                     save_numbers_txt(NUMBER_FILE, current_numbers)
-                    print_dual_status(next_ready, cfg, "剩余号码", len(current_numbers))
-                    # 跳过不消耗该卡发送节奏，仍立即可用
+                    print_send_skip(slot, phone, cfg, "已存在于 sent number.txt", len(current_numbers))
                     next_ready[slot] = time.time()
+                    status_dirty_slots.add(slot)
                     continue
 
+                print(f"准备发送 -> {get_slot_label(slot, cfg)} / {phone}")
                 ok, out, err = termux_send_sms(phone, text, slot)
 
                 append_log({
@@ -654,8 +664,6 @@ def send_batch_round1():
 
                 if ok:
                     success += 1
-                    print_send_success(slot, phone, cfg)
-
                     current_numbers = load_numbers_txt(NUMBER_FILE)
                     if current_numbers and current_numbers[0] == phone:
                         current_numbers.pop(0)
@@ -666,17 +674,21 @@ def send_batch_round1():
                     append_number_if_missing(SENT_NUMBER_FILE, phone)
                     sent_set.add(phone)
 
-                    wait_sec = random_interval_for_slot(slot, cfg)
-                    next_ready[slot] = time.time() + wait_sec
-
-                    print_dual_status(next_ready, cfg, "剩余号码", len(current_numbers))
+                    print_send_success(slot, phone, cfg, len(current_numbers))
                 else:
                     fail += 1
-                    print_send_fail(slot, phone, cfg, err or out)
-                    # 失败不删除号码，该卡稍后再试下一个时间点
-                    wait_sec = random_interval_for_slot(slot, cfg)
-                    next_ready[slot] = time.time() + wait_sec
-                    print_dual_status(next_ready, cfg, "剩余号码", len(load_numbers_txt(NUMBER_FILE)))
+                    print_send_fail(slot, phone, cfg, err or out, len(load_numbers_txt(NUMBER_FILE)))
+
+                wait_sec = random_interval_for_slot(slot, cfg)
+                next_ready[slot] = time.time() + wait_sec
+                status_dirty_slots.add(slot)
+
+            if len(active_slots) > 1 and all(slot in status_dirty_slots for slot in active_slots):
+                print_compact_next_times(next_ready, cfg, active_slots)
+                status_dirty_slots.clear()
+            elif len(active_slots) == 1 and status_dirty_slots:
+                print_compact_next_times(next_ready, cfg, active_slots)
+                status_dirty_slots.clear()
 
     except KeyboardInterrupt:
         print("\n已手动停止第一轮发送")
@@ -827,7 +839,6 @@ def send_batch_round2():
     success = 0
     fail = 0
 
-    # 为每个联系人确定归属卡槽，再拆成两个队列独立计时
     slot_queues = {
         cfg["sim1_slot"]: [],
         cfg["sim2_slot"]: []
@@ -846,7 +857,19 @@ def send_batch_round2():
         return
 
     now_ts = time.time()
-    next_ready = {slot: now_ts for slot in active_slots}
+    next_ready = {}
+
+    if len(active_slots) == 1:
+        next_ready[active_slots[0]] = now_ts
+    else:
+        sim1 = cfg["sim1_slot"]
+        sim2 = cfg["sim2_slot"]
+        if sim1 in active_slots:
+            next_ready[sim1] = now_ts
+        if sim2 in active_slots:
+            next_ready[sim2] = now_ts + 5
+
+    status_dirty_slots = set(active_slots)
 
     print(f"\n开始第二轮发送，共 {total} 个联系人号码")
     print(f"筛选规则：联系人名称包含前缀 {prefix}")
@@ -878,6 +901,7 @@ def send_batch_round2():
                 name = item["name"]
                 phone = item["phone"]
 
+                print(f"准备发送 -> {get_slot_label(slot, cfg)} / {name} / {phone}")
                 ok, out, err_text = termux_send_sms(phone, text, slot)
 
                 append_log({
@@ -892,18 +916,25 @@ def send_batch_round2():
                     "stderr": err_text
                 })
 
+                remaining_total = sum(len(slot_queues[s]) for s in active_slots)
+
                 if ok:
                     success += 1
-                    print_send_success(slot, phone, cfg, name)
+                    print_send_success(slot, phone, cfg, remaining_total, name)
                 else:
                     fail += 1
-                    print_send_fail(slot, phone, cfg, err_text or out, name)
+                    print_send_fail(slot, phone, cfg, err_text or out, remaining_total, name)
 
                 wait_sec = random_interval_for_slot(slot, cfg)
                 next_ready[slot] = time.time() + wait_sec
+                status_dirty_slots.add(slot)
 
-                remaining_total = sum(len(slot_queues[s]) for s in active_slots)
-                print_dual_status(next_ready, cfg, "剩余联系人", remaining_total)
+            if len(active_slots) > 1 and all(slot in status_dirty_slots for slot in active_slots):
+                print_compact_next_times(next_ready, cfg, active_slots)
+                status_dirty_slots.clear()
+            elif len(active_slots) == 1 and status_dirty_slots:
+                print_compact_next_times(next_ready, cfg, active_slots)
+                status_dirty_slots.clear()
 
     except KeyboardInterrupt:
         remaining_total = sum(len(slot_queues[s]) for s in active_slots)
