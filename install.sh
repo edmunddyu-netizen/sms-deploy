@@ -2,7 +2,7 @@
 set -e
 
 BASE_DIR="$HOME/sms_tool"
-BASE_URL="https://raw.githubusercontent.com/你的GitHub用户名/sms-deploy/main"
+BASE_URL="https://raw.githubusercontent.com/edmunddyu-netizen/sms-deploy/main"
 
 echo "第1步：更新软件包列表"
 pkg update -y
