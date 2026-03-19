@@ -6,7 +6,7 @@ import subprocess
 import sys
 from datetime import datetime
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = "/storage/emulated/0/sms_tool"
 
 NUMBER_FILE = os.path.join(BASE_DIR, "number.txt")
 CONTENT1_FILE = os.path.join(BASE_DIR, "guanggao.txt")
@@ -18,8 +18,8 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 LOG_FILE = os.path.join(BASE_DIR, "logs.json")
 
 DEFAULT_CONFIG = {
-    "send_mode_round1": "rotate",         # sim1 / sim2 / rotate
-    "send_mode_round2": "inherit",        # sim1 / sim2 / inherit
+    "send_mode_round1": "rotate",
+    "send_mode_round2": "inherit",
     "sim1_slot": 0,
     "sim2_slot": 1,
     "sim1_min_interval": 1200,
@@ -442,6 +442,7 @@ def show_status():
     logs = load_logs()
 
     print("\n===== 当前状态 =====")
+    print("共享目录：", BASE_DIR)
     print("号码合集1剩余数量：", len(n1))
     print("已发送成功数量：", len(sent))
     print("内容1长度：", len(content1))
@@ -882,6 +883,7 @@ def show_recent_logs():
 
 def show_file_locations():
     print("\n===== 文件位置 =====")
+    print("共享目录：", BASE_DIR)
     print("号码合集1：", NUMBER_FILE)
     print("内容1：", CONTENT1_FILE)
     print("已发送：", SENT_NUMBER_FILE)
@@ -895,10 +897,11 @@ def show_file_locations():
 def show_help():
     print("\n===== 菜单使用说明 =====")
     print("一、第一轮发送前")
-    print("1. 手动编辑 number.txt，放入号码，一行一个")
-    print("2. 手动编辑 guanggao.txt，写入第一轮内容")
-    print("3. 如需修改模式、卡槽、随机区间、联系人前缀，进入配置菜单设置")
-    print("4. 回主菜单执行“第一轮发送”")
+    print("1. 到手机文件管理器里打开 /storage/emulated/0/sms_tool")
+    print("2. 手动编辑 number.txt，放入号码，一行一个")
+    print("3. 手动编辑 guanggao.txt，写入第一轮内容")
+    print("4. 如需修改模式、卡槽、随机区间、联系人前缀，进入配置菜单设置")
+    print("5. 回主菜单执行“第一轮发送”")
     print("")
     print("二、第一轮发送规则")
     print("1. 发送成功一条，就会从 number.txt 删除一条")
