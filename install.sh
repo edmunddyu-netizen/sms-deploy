@@ -44,7 +44,7 @@ chmod +x "$APP_DIR/123.sh"
 chmod +x "$APP_DIR/yzp.sh"
 
 echo "第6步：创建快捷命令"
-cat > "$PREFIX/bin/sms-tool" <<'EOF'
+cat > "$PREFIX/bin/sd" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 bash "$HOME/sms_tool/run.sh"
 EOF
@@ -59,13 +59,13 @@ cat > "$PREFIX/bin/yzp.sh" <<'EOF'
 bash "$HOME/sms_tool/yzp.sh"
 EOF
 
-chmod +x "$PREFIX/bin/sms-tool"
+chmod +x "$PREFIX/bin/sd"
 chmod +x "$PREFIX/bin/123.sh"
 chmod +x "$PREFIX/bin/yzp.sh"
 
 echo ""
 echo "安装完成"
-echo "菜单模式：sms-tool"
+echo "菜单模式：sd"
 echo "第一轮快捷发送：123.sh"
 echo "第二轮快捷发送：yzp.sh"
 echo ""
