@@ -309,8 +309,8 @@ def confirm_before_round(title, content_file, content_text, extra_lines):
     for line in extra_lines:
         print(line)
     print("")
-    answer = input("确认开始发送吗？输入 yes 开始，其它任意内容取消: ").strip().lower()
-    return answer == "yes"
+    answer = input("确认开始发送吗？输入 1 开始，其它任意内容取消: ").strip().lower()
+    return answer == "1"
 
 
 def get_sent_slot_map():
