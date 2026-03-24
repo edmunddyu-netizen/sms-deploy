@@ -558,6 +558,114 @@ def show_status():
     print("====================")
 
 
+def config_menu():
+    while True:
+        cfg = load_config()
+        print("\n===== 配置菜单 =====")
+        print("1. 设置第一轮模式（sim1 / sim2 / rotate）")
+        print("2. 设置第二轮模式（sim1 / sim2 / inherit / rotate）")
+        print("3. 设置SIM1对应slot")
+        print("4. 设置SIM2对应slot")
+        print("5. 设置SIM1最小发送间隔秒数")
+        print("6. 设置SIM1最大发送间隔秒数")
+        print("7. 设置SIM2最小发送间隔秒数")
+        print("8. 设置SIM2最大发送间隔秒数")
+        print("9. 设置扫描收件箱条数")
+        print("10. 设置联系人前缀")
+        print("11. 返回")
+
+        choice = input("请选择：").strip()
+
+        if choice == "1":
+            val = input("请输入 sim1 / sim2 / rotate：").strip().lower()
+            if val in ["sim1", "sim2", "rotate"]:
+                cfg["send_mode_round1"] = val
+                save_config(cfg)
+                print("已保存")
+            else:
+                print("输入无效")
+
+        elif choice == "2":
+            val = input("请输入 sim1 / sim2 / inherit / rotate：").strip().lower()
+            if val in ["sim1", "sim2", "inherit", "rotate"]:
+                cfg["send_mode_round2"] = val
+                save_config(cfg)
+                print("已保存")
+            else:
+                print("输入无效")
+
+        elif choice == "3":
+            try:
+                cfg["sim1_slot"] = int(input("请输入SIM1对应slot（一般0或1）：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "4":
+            try:
+                cfg["sim2_slot"] = int(input("请输入SIM2对应slot（一般0或1）：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "5":
+            try:
+                cfg["sim1_min_interval"] = int(input("请输入SIM1最小发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "6":
+            try:
+                cfg["sim1_max_interval"] = int(input("请输入SIM1最大发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "7":
+            try:
+                cfg["sim2_min_interval"] = int(input("请输入SIM2最小发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "8":
+            try:
+                cfg["sim2_max_interval"] = int(input("请输入SIM2最大发送间隔秒数：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "9":
+            try:
+                cfg["scan_inbox_limit"] = int(input("请输入扫描收件箱条数（如500）：").strip())
+                save_config(cfg)
+                print("已保存")
+            except Exception:
+                print("输入无效")
+
+        elif choice == "10":
+            val = input("请输入联系人前缀（如 YZP_ 或 验证）：").strip()
+            if val:
+                cfg["contact_prefix"] = val
+                save_config(cfg)
+                print("已保存")
+            else:
+                print("前缀不能为空")
+
+        elif choice == "11":
+            break
+
+        else:
+            print("无效选择")
+
+
 def send_batch_round1():
     cfg = load_config()
     errors = validate_runtime_config(cfg)
@@ -863,18 +971,8 @@ def send_batch_round2():
     success = 0
     fail = 0
 
-    slot_queues = {
-        cfg["sim1_slot"]: [],
-        cfg["sim2_slot"]: []
-    }
-
-    for item in queue_items:
-        slot = item["slot"]
-        if slot not in slot_queues:
-            slot_queues[slot] = []
-        slot_queues[slot].append(item)
-
-    active_slots = [slot for slot, q in slot_queues.items() if len(q) > 0]
+    current_queue = load_round2_queue()
+    active_slots = sorted(list(set(item["slot"] for item in current_queue)))
     if not active_slots:
         print("没有可发送的联系人")
         return
@@ -902,7 +1000,6 @@ def send_batch_round2():
 
     try:
         while True:
-            # 每轮都从文件重载，确保删除后的进度真实落盘
             current_queue = load_round2_queue()
             if not current_queue:
                 break
@@ -962,7 +1059,6 @@ def send_batch_round2():
 
                 if ok:
                     success += 1
-                    # 成功才删这一条，避免重启重复发前面已经发过的
                     new_queue = []
                     removed = False
                     for q in current_queue:
@@ -977,7 +1073,6 @@ def send_batch_round2():
                     print_send_success(slot, phone, cfg, len(new_queue), name)
                 else:
                     fail += 1
-                    # 失败不删，留在队列里，后续可重试
                     print_send_fail(slot, phone, cfg, err_text or out, len(current_queue), name)
 
                 wait_sec = random_interval_for_slot(slot, cfg)
