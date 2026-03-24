@@ -15,6 +15,8 @@ SENT_NUMBER_FILE = os.path.join(BASE_DIR, "sent number.txt")
 CONTENT2_FILE = os.path.join(BASE_DIR, "yzp huashu.txt")
 YZP_INFO_FILE = os.path.join(BASE_DIR, "yzp info.txt")
 YZP_QUEUE_FILE = os.path.join(BASE_DIR, "yzp queue.txt")
+YZP_BIND_FILE = os.path.join(BASE_DIR, "yzp bind.txt")
+YZP_AUTO_BIND_FILE = os.path.join(BASE_DIR, "yzp auto bind.txt")
 
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 LOG_FILE = os.path.join(BASE_DIR, "logs.json")
@@ -59,6 +61,8 @@ def ensure_files():
         CONTENT2_FILE,
         YZP_INFO_FILE,
         YZP_QUEUE_FILE,
+        YZP_BIND_FILE,
+        YZP_AUTO_BIND_FILE,
     ]
     for path in files_to_init:
         if not os.path.exists(path):
@@ -326,17 +330,49 @@ def get_sent_slot_map():
     return result
 
 
-def pick_slot_for_round2(item_index, phone, cfg):
-    mode = cfg["send_mode_round2"]
-    if mode == "sim1":
-        return cfg["sim1_slot"]
-    if mode == "sim2":
-        return cfg["sim2_slot"]
-    if mode == "rotate":
-        return cfg["sim1_slot"] if item_index % 2 == 0 else cfg["sim2_slot"]
+def parse_bind_file(path):
+    result = {}
+    if not os.path.exists(path):
+        return result
 
-    sent_slot_map = get_sent_slot_map()
-    return sent_slot_map.get(phone, cfg["sim1_slot"])
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if "=" not in line:
+                continue
+            phone_raw, slot_raw = line.split("=", 1)
+            phone = normalize_phone(phone_raw.strip())
+            slot_raw = slot_raw.strip()
+            if not phone:
+                continue
+            try:
+                slot = int(slot_raw)
+            except Exception:
+                continue
+            result[phone] = slot
+    return result
+
+
+def save_bind_file(path, bind_map):
+    phones = sorted(bind_map.keys())
+    with open(path, "w", encoding="utf-8") as f:
+        for phone in phones:
+            slot = bind_map[phone]
+            f.write(f"{phone}={slot}\n")
+
+
+def load_manual_bind_map():
+    return parse_bind_file(YZP_BIND_FILE)
+
+
+def load_auto_bind_map():
+    return parse_bind_file(YZP_AUTO_BIND_FILE)
+
+
+def save_auto_bind_map(bind_map):
+    save_bind_file(YZP_AUTO_BIND_FILE, bind_map)
 
 
 def extract_contact_name(contact):
@@ -496,6 +532,95 @@ def save_round2_queue(items):
             f.write(f"{name}\t{phone}\t{slot}\n")
 
 
+def scan_prefixed_contacts_and_update_binds():
+    cfg = load_config()
+    prefix = cfg.get("contact_prefix", "YZP_")
+
+    contacts, err = load_prefixed_contacts(prefix)
+    if contacts is None:
+        print("读取联系人失败：", err)
+        return
+
+    manual_bind = load_manual_bind_map()
+    auto_bind = load_auto_bind_map()
+    sent_slot_map = get_sent_slot_map()
+
+    resolved_by_manual = []
+    resolved_by_auto = []
+    unresolved = []
+
+    changed_auto = False
+
+    for item in contacts:
+        name = item["name"]
+        phone = item["phone"]
+
+        if phone in manual_bind:
+            resolved_by_manual.append((name, phone, manual_bind[phone]))
+            continue
+
+        if phone in sent_slot_map:
+            slot = sent_slot_map[phone]
+            if auto_bind.get(phone) != slot:
+                auto_bind[phone] = slot
+                changed_auto = True
+            resolved_by_auto.append((name, phone, slot))
+            continue
+
+        unresolved.append((name, phone))
+
+    if changed_auto:
+        save_auto_bind_map(auto_bind)
+
+    lines = []
+    lines.append("===== 前缀联系人归属扫描结果 =====")
+    lines.append(f"生成时间: {now_str()}")
+    lines.append(f"联系人前缀: {prefix}")
+    lines.append("")
+
+    lines.append("一、已在手动绑定 yzp bind.txt 中指定归属的号码")
+    lines.append("--------------------------------------------------")
+    if resolved_by_manual:
+        for name, phone, slot in resolved_by_manual:
+            lines.append(f"{name}\t{phone}\t{slot}")
+    else:
+        lines.append("无")
+    lines.append("")
+
+    lines.append("二、已在第一轮发送记录中识别归属，并写入/更新到 yzp auto bind.txt 的号码")
+    lines.append("--------------------------------------------------")
+    if resolved_by_auto:
+        for name, phone, slot in resolved_by_auto:
+            lines.append(f"{name}\t{phone}\t{slot}")
+    else:
+        lines.append("无")
+    lines.append("")
+
+    lines.append("三、未识别归属的老号码（需要你手动写入 yzp bind.txt）")
+    lines.append("--------------------------------------------------")
+    if unresolved:
+        for name, phone in unresolved:
+            lines.append(f"{name}\t{phone}")
+    else:
+        lines.append("无")
+    lines.append("")
+
+    lines.append("四、说明")
+    lines.append("1. 老号码：第一轮发送记录里查不到，需要你手动写入 yzp bind.txt")
+    lines.append("2. 新号码：第一轮发送记录里查得到，会自动写入 yzp auto bind.txt")
+    lines.append("3. 第二轮生成队列时，优先级：yzp bind.txt > yzp auto bind.txt")
+    lines.append("")
+
+    write_text(YZP_INFO_FILE, "\n".join(lines))
+
+    print("扫描完成，已更新：")
+    print(f"- {YZP_INFO_FILE}")
+    print(f"- {YZP_AUTO_BIND_FILE}")
+    print(f"手动绑定数量：{len(resolved_by_manual)}")
+    print(f"自动识别数量：{len(resolved_by_auto)}")
+    print(f"待手动处理数量：{len(unresolved)}")
+
+
 def generate_round2_queue():
     cfg = load_config()
     prefix = cfg.get("contact_prefix", "YZP_")
@@ -505,25 +630,48 @@ def generate_round2_queue():
         print("读取联系人失败：", err)
         return
 
-    if not contacts:
-        print(f"未找到名称包含前缀 {prefix} 的联系人")
-        return
+    manual_bind = load_manual_bind_map()
+    auto_bind = load_auto_bind_map()
 
     queue_items = []
-    for idx, item in enumerate(contacts):
+    unresolved = []
+
+    for item in contacts:
+        name = item["name"]
         phone = item["phone"]
-        slot = pick_slot_for_round2(idx, phone, cfg)
-        queue_items.append({
-            "name": item["name"],
-            "phone": phone,
-            "slot": slot
-        })
+
+        if phone in manual_bind:
+            slot = manual_bind[phone]
+            queue_items.append({
+                "name": name,
+                "phone": phone,
+                "slot": slot
+            })
+        elif phone in auto_bind:
+            slot = auto_bind[phone]
+            queue_items.append({
+                "name": name,
+                "phone": phone,
+                "slot": slot
+            })
+        else:
+            unresolved.append({
+                "name": name,
+                "phone": phone
+            })
 
     save_round2_queue(queue_items)
 
     print(f"已生成第二轮队列：{YZP_QUEUE_FILE}")
-    print(f"队列数量：{len(queue_items)}")
-    print("格式：联系人名称\t号码\t继承卡槽")
+    print(f"可发送队列数量：{len(queue_items)}")
+    print(f"未识别归属数量：{len(unresolved)}")
+
+    if unresolved:
+        print("以下号码未识别归属，请手动写入 yzp bind.txt 后重新生成队列：")
+        for item in unresolved[:20]:
+            print(f"- {item['name']} / {item['phone']}")
+        if len(unresolved) > 20:
+            print(f"... 其余 {len(unresolved) - 20} 条未展开")
 
 
 def show_status():
@@ -533,6 +681,8 @@ def show_status():
     content1 = read_text(CONTENT1_FILE)
     content2 = read_text(CONTENT2_FILE)
     round2_queue = load_round2_queue()
+    manual_bind = load_manual_bind_map()
+    auto_bind = load_auto_bind_map()
     logs = load_logs()
 
     print("\n===== 当前状态 =====")
@@ -540,6 +690,8 @@ def show_status():
     print("号码合集1剩余数量：", len(n1))
     print("已发送成功数量：", len(sent))
     print("第二轮队列剩余数量：", len(round2_queue))
+    print("手动绑定数量：", len(manual_bind))
+    print("自动绑定数量：", len(auto_bind))
     print("内容1长度：", len(content1))
     print("内容2长度：", len(content2))
     print("第一轮模式：", cfg.get("send_mode_round1"))
@@ -818,94 +970,29 @@ def send_batch_round1():
     )
 
 
-def scan_replies_to_info():
+def scan_prefix_contacts_menu():
     cfg = load_config()
-    sent_numbers = set(load_numbers_txt(SENT_NUMBER_FILE))
+    prefix = cfg.get("contact_prefix", "YZP_")
+    contacts, err = load_prefixed_contacts(prefix)
 
-    print(f"\n开始扫描收件箱，最多读取最近 {cfg['scan_inbox_limit']} 条短信...")
-
-    sms_result = subprocess.run(
-        ["termux-sms-list", "-t", "inbox", "-l", str(cfg["scan_inbox_limit"])],
-        capture_output=True,
-        text=True
-    )
-    if sms_result.returncode != 0:
-        print("读取收件箱失败")
-        if sms_result.stderr.strip():
-            print("错误：", sms_result.stderr.strip())
-        elif sms_result.stdout.strip():
-            print("输出：", sms_result.stdout.strip())
+    if contacts is None:
+        print("读取联系人失败：", err)
         return
 
-    try:
-        sms_data = json.loads(sms_result.stdout)
-    except Exception as e:
-        print("短信JSON解析失败：", e)
+    print("\n===== 扫描前缀联系人确认 =====")
+    print(f"联系人前缀: {prefix}")
+    print(f"当前匹配联系人数量: {len(contacts)}")
+    print("作用：")
+    print("1. 已在第一轮发送记录里的号码 -> 自动写入 yzp auto bind.txt")
+    print("2. 查不到归属的老号码 -> 列到 yzp info.txt，等你手动写入 yzp bind.txt")
+    print("")
+
+    answer = input("确认开始扫描吗？输入 1 开始，其它任意内容取消: ").strip()
+    if answer != "1":
+        print("已取消扫描")
         return
 
-    contact_name_map, contact_err = build_contact_name_map()
-
-    first_reply_map = {}
-    for msg in sms_data:
-        if not isinstance(msg, dict):
-            continue
-
-        phone = normalize_phone(msg.get("address", ""))
-        if not phone or phone not in sent_numbers:
-            continue
-
-        if phone in first_reply_map:
-            continue
-
-        body = str(msg.get("body", "")).strip()
-        raw_time = msg.get("received", msg.get("date", msg.get("timestamp", "")))
-        reply_time = format_sms_time(raw_time)
-
-        first_reply_map[phone] = {
-            "reply_time": reply_time,
-            "reply_text": body,
-            "raw_time": raw_time
-        }
-
-    sent_slot_map = get_sent_slot_map()
-
-    lines = []
-    lines.append("===== yzp info =====")
-    lines.append(f"生成时间: {now_str()}")
-    lines.append("说明: 第二轮发送不读取这个文件，只给你查看。")
-    lines.append("先扫描回复，再手动给联系人加前缀，然后单独生成第二轮队列。")
-    lines.append("")
-
-    count = 0
-    sorted_items = sorted(
-        first_reply_map.items(),
-        key=lambda x: str(x[1].get("raw_time", "")),
-        reverse=True
-    )
-
-    for phone, info in sorted_items:
-        count += 1
-        slot = sent_slot_map.get(phone, "未知")
-        contact_name = contact_name_map.get(phone, "未命名联系人")
-        lines.append("========================================")
-        lines.append(f"号码: {phone}")
-        lines.append(f"联系人名称: {contact_name}")
-        lines.append(f"回复时间: {info.get('reply_time', '未知')}")
-        lines.append(f"第一条回复内容: {info.get('reply_text', '')}")
-        lines.append(f"继承卡槽: {slot}")
-        lines.append("========================================")
-        lines.append("")
-
-    if count == 0:
-        lines.append("未发现来自 sent number.txt 的回复号码。")
-        lines.append("")
-
-    write_text(YZP_INFO_FILE, "\n".join(lines))
-
-    print("扫描完成，已更新 yzp info.txt")
-    print("识别到回复号码数量：", count)
-    if contact_err:
-        print("联系人名称读取未完全成功：", contact_err)
+    scan_prefixed_contacts_and_update_binds()
 
 
 def generate_round2_queue_menu():
@@ -920,9 +1007,10 @@ def generate_round2_queue_menu():
     print("\n===== 生成第二轮队列确认 =====")
     print(f"联系人前缀: {prefix}")
     print(f"当前匹配联系人数量: {len(contacts)}")
-    print(f"第二轮发送模式: {cfg['send_mode_round2']}")
-    print("将生成 yzp queue.txt，后续第二轮发送只读取这个队列文件。")
-    print("这样发送时会发一条删一条，避免卡死后重复发送。")
+    print("队列归属优先级：")
+    print("1. yzp bind.txt（你手动指定的老号码）")
+    print("2. yzp auto bind.txt（程序第一轮自动识别的新号码）")
+    print("3. 以上都没有的号码，不进队列")
     print("")
 
     answer = input("确认生成第二轮队列吗？输入 1 开始，其它任意内容取消: ").strip()
@@ -964,7 +1052,7 @@ def send_batch_round2():
 
     if not queue_items:
         print("第二轮队列为空")
-        print("请先执行：生成第二轮队列")
+        print("请先执行：扫描前缀联系人 -> 生成第二轮队列")
         return
 
     total = len(queue_items)
@@ -1130,8 +1218,10 @@ def show_file_locations():
     print("内容1：", CONTENT1_FILE)
     print("已发送：", SENT_NUMBER_FILE)
     print("内容2：", CONTENT2_FILE)
-    print("回复详情：", YZP_INFO_FILE)
+    print("扫描结果：", YZP_INFO_FILE)
     print("第二轮队列：", YZP_QUEUE_FILE)
+    print("手动绑定：", YZP_BIND_FILE)
+    print("自动绑定：", YZP_AUTO_BIND_FILE)
     print("配置文件：", CONFIG_FILE)
     print("发送日志：", LOG_FILE)
     print("====================")
@@ -1139,38 +1229,30 @@ def show_file_locations():
 
 def show_help():
     print("\n===== 菜单使用说明 =====")
-    print("一、第一轮发送前")
-    print("1. 到手机文件管理器里打开 /storage/emulated/0/sms_tool")
-    print("2. 手动编辑 number.txt，放入号码，一行一个")
-    print("3. 手动编辑 guanggao.txt，写入第一轮内容")
-    print("4. 如需修改模式、卡槽、随机区间、联系人前缀，进入配置菜单设置")
-    print("5. 回主菜单执行“第一轮发送”")
+    print("一、老号码与新号码")
+    print("1. 老号码：第一轮记录里查不到，需手动写入 yzp bind.txt")
+    print("2. 新号码：第一轮记录里查得到，自动写入 yzp auto bind.txt")
     print("")
-    print("二、第一轮发送规则")
-    print("1. 发送成功一条，就会从 number.txt 删除一条")
-    print("2. 同时会写入 sent number.txt")
-    print("3. 如果发送失败，该号码会保留在 number.txt")
-    print("4. 如果号码已存在于 sent number.txt，会被直接跳过，不再发送内容1")
-    print("5. 双卡模式下，两张卡独立计时，谁先到时间谁先发")
+    print("二、第一轮发送前")
+    print("1. 编辑 number.txt")
+    print("2. 编辑 guanggao.txt")
+    print("3. 执行第一轮发送")
     print("")
-    print("三、扫描回复")
-    print("1. 第一轮完成后，执行“扫描回复”")
-    print("2. 程序会生成 yzp info.txt")
-    print("3. 你根据 yzp info.txt，去联系人里手动加前缀")
+    print("三、第二轮流程")
+    print("1. 给需要第二轮的联系人加前缀")
+    print("2. 执行“扫描前缀联系人”")
+    print("3. 查看 yzp info.txt")
+    print("4. 把老号码手动写入 yzp bind.txt")
+    print("5. 执行“生成第二轮队列”")
+    print("6. 执行“第二轮发送”")
     print("")
-    print("四、生成第二轮队列")
-    print("1. 执行“生成第二轮队列”")
-    print("2. 程序会扫描符合前缀的联系人")
-    print("3. 生成 yzp queue.txt")
-    print("4. 后续第二轮发送只认这个队列文件")
+    print("四、第二轮规则")
+    print("1. 归属优先级：yzp bind.txt > yzp auto bind.txt")
+    print("2. 第二轮只读 yzp queue.txt")
+    print("3. 发送成功一条删一条")
+    print("4. 卡死重启后从剩余队列继续")
     print("")
-    print("五、第二轮发送规则")
-    print("1. 第二轮读取 yzp queue.txt")
-    print("2. 发送成功一条，就从 yzp queue.txt 删除一条")
-    print("3. 如果中途卡死，重新启动时会从剩余队列继续")
-    print("4. 这样可以避免重复给前面已发送联系人再发一次")
-    print("")
-    print("六、快捷命令")
+    print("五、快捷命令")
     print("sd      = 打开菜单")
     print("123.sh  = 直接执行第一轮")
     print("yzp.sh  = 直接执行第二轮")
@@ -1184,9 +1266,9 @@ def main_menu():
         print("\n========== 短信工具 ==========")
         print("1. 查看当前状态")
         print("2. 执行第一轮发送")
-        print("3. 扫描回复 -> 生成 yzp info.txt")
-        print("4. 生成第二轮队列（按联系人前缀）")
-        print("5. 执行第二轮发送（按 yzp queue.txt）")
+        print("3. 扫描前缀联系人（更新 auto bind / 提示老号码）")
+        print("4. 生成第二轮队列")
+        print("5. 执行第二轮发送")
         print("6. 配置模式 / 卡槽 / 随机区间 / 前缀")
         print("7. 查看最近日志")
         print("8. 查看文件位置")
@@ -1203,7 +1285,7 @@ def main_menu():
             send_batch_round1()
             pause()
         elif choice == "3":
-            scan_replies_to_info()
+            scan_prefix_contacts_menu()
             pause()
         elif choice == "4":
             generate_round2_queue_menu()
